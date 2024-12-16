@@ -72,37 +72,40 @@ def get_audio_transcript(video_id):
         
         try:
             st.info(f"Transcribiendo audio del video {video_id}...")
+            
+            # Configurar YouTube con headers personalizados
             yt = YouTube(
-                f'https://youtube.com/watch?v={video_id}',
+                url=f'https://youtube.com/watch?v={video_id}',
+                proxies=None,
                 use_oauth=False,
-                allow_oauth_cache=False
+                allow_oauth_cache=False,
             )
             
-            # Intentar diferentes calidades de audio
-            audio_stream = None
-            streams = yt.streams.filter(only_audio=True).order_by('abr').desc()
+            # Configurar user agent
+            yt.stream_monostate.headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
             
-            for stream in streams:
-                try:
-                    audio_stream = stream
-                    audio_stream.download(output_path=temp_dir, filename=f"{video_id}.mp4")
-                    break
-                except Exception as e:
-                    continue
-                    
+            # Obtener el stream con la mejor calidad de audio
+            audio_stream = yt.streams.filter(only_audio=True, file_extension='mp4').order_by('abr').desc().first()
+            
             if not audio_stream:
                 raise Exception("No se pudo obtener el audio del video")
+                
+            # Descargar el audio
+            audio_stream.download(output_path=temp_dir, filename=f"{video_id}.mp4")
             
+            # Transcribir con Whisper
             model = load_whisper_model()
             result = model.transcribe(temp_path, language='es')
             
-            transcript_data = [
-                {
-                    'text': segment['text'].strip(),
-                    'start': round(segment['start'], 1)
-                }
-                for segment in result['segments']
-            ]
+            # Solo guardar el texto sin timestamps
+            transcript_text = " ".join([segment['text'].strip() for segment in result['segments']])
+            
+            transcript_data = [{
+                'text': transcript_text,
+                'start': 0
+            }]
             
             return transcript_data, "Whisper (audio)"
             
@@ -150,23 +153,6 @@ def get_transcript(video_id):
                         break
                 except:
                     continue
-        
-        # Último intento: cualquier transcripción disponible
-        if not transcript:
-            try:
-                available_transcripts = transcript_list.manual_transcripts
-                if available_transcripts:
-                    transcript = list(available_transcripts.values())[0]
-                    lang = transcript.language_code
-                    transcript_info = f"Manual ({lang})"
-                else:
-                    available_transcripts = transcript_list.generated_transcripts
-                    if available_transcripts:
-                        transcript = list(available_transcripts.values())[0]
-                        lang = transcript.language_code
-                        transcript_info = f"Automática ({lang})"
-            except:
-                pass
         
         if transcript:
             try:
@@ -235,10 +221,16 @@ def get_channel_videos(api_key, channel_identifier, max_results=10):
             progress_text.text(f"Procesando video {i+1} de {total_videos}...")
             progress_bar.progress((i + 1) / total_videos)
             
+            # Obtener y procesar transcripción
             transcript_data, transcript_info = get_transcript(video['id'])
             transcript_text = ""
             if transcript_data:
-                transcript_text = "\n".join([f"{item['start']:.1f}s: {item['text']}" for item in transcript_data])
+                # Para transcripciones normales de YouTube, eliminar timestamps
+                if transcript_info != "Whisper (audio)":
+                    transcript_text = " ".join([item['text'] for item in transcript_data])
+                else:
+                    # Para transcripciones de Whisper, ya vienen sin timestamps
+                    transcript_text = transcript_data[0]['text']
             
             videos.append({
                 'title': video['snippet']['title'],
