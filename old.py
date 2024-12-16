@@ -340,13 +340,35 @@ def main():
                 st.session_state.channel_identifier,
                 st.session_state.max_results
             )
-            
-    # Mostrar videos si existen en session_state
+        # Mostrar videos si existen en session_state
     if st.session_state.videos:
         st.success(f"✅ Se encontraron {len(st.session_state.videos)} videos!")
         
         for video in st.session_state.videos:
-                                   # Botones de descarga
+            st.write("---")
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+                st.image(video['thumbnail'])
+            
+            with col2:
+                st.markdown(f"### [{video['title']}]({video['url']})")
+                st.write(f"👁️ Vistas: {int(video['views']):,}  |  👍 Likes: {int(video['likes']):,}")
+                
+                tab1, tab2 = st.tabs(["📝 Descripción", "🎯 Transcripción"])
+                with tab1:
+                    st.write(video['description'])
+                with tab2:
+                    col1, col2 = st.columns([3,1])
+                    with col1:
+                        if video['transcript']:
+                            st.text_area("", value=video['transcript'], height=200)
+                        else:
+                            st.info("No hay transcripción disponible para este video")
+                    with col2:
+                        st.info(f"Tipo: {video['transcript_info']}")
+        
+        # Botones de descarga
         st.write("---")
         st.subheader("📥 Descargar Datos")
         col1, col2 = st.columns(2)
@@ -376,6 +398,3 @@ def main():
                 file_name=f"transcripts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
                 mime="text/plain"
             )
-
-if __name__ == "__main__":
-    main()
