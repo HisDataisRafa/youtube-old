@@ -398,3 +398,6 @@ def main():
                 file_name=f"transcripts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
                 mime="text/plain"
             )
+
+if __name__ == "__main__":
+    main()
