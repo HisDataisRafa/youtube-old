@@ -7,27 +7,8 @@ import time
 import whisper
 from pytube import YouTube
 import os
-import pytube.request
-import pytube.cipher
 
-# Configurar pytube
-pytube.request.default_range_size = 1048576  # 1MB en bytes
-
-def patch_pytube():
-    """
-    Parcha pytube para evitar errores de conexión
-    """
-    pytube.request.default_range_size = 1048576
-    
-    def get_throttling_function_name(js):
-        return "xxx"
-        
-    pytube.cipher.get_throttling_function_name = get_throttling_function_name
-
-# Aplicar el patch al inicio
-patch_pytube()
-
-# Inicializar variables de estado
+# Inicializar todas las variables de estado necesarias
 if 'videos' not in st.session_state:
     st.session_state.videos = None
 if 'api_key' not in st.session_state:
@@ -91,27 +72,15 @@ def get_audio_transcript(video_id):
         
         try:
             st.info(f"Transcribiendo audio del video {video_id}...")
-            
-            # Configurar headers
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Connection': 'keep-alive',
-            }
-            
             yt = YouTube(
-                url=f'https://youtube.com/watch?v={video_id}'
+                f'https://youtube.com/watch?v={video_id}',
+                use_oauth=True,
+                allow_oauth_cache=True
             )
             
-            # Aplicar headers
-            yt.stream_monostate.headers = headers
-            
-            # Intentar diferentes streams
-            streams = yt.streams.filter(only_audio=True).order_by('abr').desc()
+            # Intentar diferentes streams si el primero falla
             audio_stream = None
-            
-            for stream in streams:
+            for stream in yt.streams.filter(only_audio=True):
                 try:
                     audio_stream = stream
                     break
@@ -121,25 +90,20 @@ def get_audio_transcript(video_id):
             if not audio_stream:
                 raise Exception("No se pudo obtener el audio del video")
                 
-            # Descargar con retry
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    audio_stream.download(output_path=temp_dir, filename=f"{video_id}.mp4")
-                    break
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        raise e
-                    time.sleep(1)
+            audio_stream.download(output_path=temp_dir, filename=f"{video_id}.mp4")
             
-            # Transcribir con Whisper
             model = load_whisper_model()
             result = model.transcribe(temp_path, language='es')
             
-            # Solo guardar el texto sin timestamps
-            transcript_text = " ".join([segment['text'].strip() for segment in result['segments']])
+            # Procesar resultado sin timestamps
+            transcript_data = [
+                {
+                    'text': segment['text'].strip()
+                }
+                for segment in result['segments']
+            ]
             
-            return [{'text': transcript_text, 'start': 0}], "Whisper (audio)"
+            return transcript_data, "Whisper (audio)"
             
         finally:
             if os.path.exists(temp_path):
@@ -154,55 +118,82 @@ def get_audio_transcript(video_id):
 
 def get_transcript(video_id):
     """
-    Obtiene la transcripción de un video, priorizando transcripciones de YouTube
+    Obtiene la transcripción de un video, primero intentando con la API de YouTube
+    y si no está disponible, usando Whisper
     """
-    transcript_data = None
-    transcript_info = "No disponible"
-    
-    # Primer intento: Transcripciones de YouTube
     try:
+        # Obtener la lista de transcripciones disponibles
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        
+        # Lista de idiomas preferidos en orden de preferencia
         preferred_languages = ['es', 'es-ES', 'es-419', 'es-US', 'en', 'en-US', 'en-GB']
         
-        # Intentar transcripciones manuales
+        # Primer intento: buscar transcripción manual en idiomas preferidos
+        transcript = None
+        transcript_info = "No encontrada"
+        
+        # Intentar primero transcripciones manuales
         for lang in preferred_languages:
             try:
-                transcript = transcript_list.find_manually_created_transcript([lang])
-                if transcript:
+                available_manual = transcript_list.find_manually_created_transcript([lang])
+                if available_manual:
+                    transcript = available_manual
                     transcript_info = f"Manual ({lang})"
-                    # Traducir si no está en español
-                    if lang.startswith('en'):
-                        transcript = transcript.translate('es')
-                        transcript_info += " (Traducida)"
-                    transcript_data = transcript.fetch()
                     break
             except:
                 continue
-                
-        # Si no hay manual, intentar automáticas
-        if not transcript_data:
+        
+        # Si no hay manual, intentar con transcripciones automáticas
+        if not transcript:
             for lang in preferred_languages:
                 try:
-                    transcript = transcript_list.find_generated_transcript([lang])
-                    if transcript:
+                    available_auto = transcript_list.find_generated_transcript([lang])
+                    if available_auto:
+                        transcript = available_auto
                         transcript_info = f"Automática ({lang})"
-                        if lang.startswith('en'):
-                            transcript = transcript.translate('es')
-                            transcript_info += " (Traducida)"
-                        transcript_data = transcript.fetch()
                         break
                 except:
                     continue
-    
-    except (TranscriptsDisabled, NoTranscriptFound) as e:
-        # Solo si no hay transcripciones disponibles, intentar Whisper
-        st.info("No se encontraron transcripciones. Intentando con audio...")
-        transcript_data, transcript_info = get_audio_transcript(video_id)
-    
+        
+        # Si aún no hay transcripción, tomar cualquiera disponible
+        if not transcript:
+            try:
+                # Intentar obtener cualquier transcripción manual
+                available_transcripts = transcript_list.manual_transcripts
+                if available_transcripts:
+                    transcript = list(available_transcripts.values())[0]
+                    lang = transcript.language_code
+                    transcript_info = f"Manual ({lang})"
+                else:
+                    # Como último recurso, tomar cualquier transcripción automática
+                    available_transcripts = transcript_list.generated_transcripts
+                    if available_transcripts:
+                        transcript = list(available_transcripts.values())[0]
+                        lang = transcript.language_code
+                        transcript_info = f"Automática ({lang})"
+            except:
+                pass
+        
+        # Si encontramos una transcripción, intentar traducirla si no está en español
+        if transcript:
+            try:
+                if transcript.language_code not in ['es', 'es-ES', 'es-419', 'es-US']:
+                    transcript = transcript.translate('es')
+                    transcript_info += " (Traducida)"
+            except Exception as e:
+                st.warning(f"No se pudo traducir la transcripción: {str(e)}")
+            
+            # Obtener el texto de la transcripción
+            transcript_data = transcript.fetch()
+            return transcript_data, transcript_info
+            
+    except (TranscriptsDisabled, NoTranscriptFound):
+        # Si no hay transcripción disponible, intentar con Whisper
+        return get_audio_transcript(video_id)
     except Exception as e:
         st.warning(f"Error al obtener transcripción: {str(e)}")
-    
-    return transcript_data, transcript_info
+        
+    return None, "No disponible"
 
 def get_channel_videos(api_key, channel_identifier, max_results=10):
     """
@@ -253,16 +244,12 @@ def get_channel_videos(api_key, channel_identifier, max_results=10):
             progress_text.text(f"Procesando video {i+1} de {total_videos}...")
             progress_bar.progress((i + 1) / total_videos)
             
-            # Obtener y procesar transcripción
+            # Obtener transcripción
             transcript_data, transcript_info = get_transcript(video['id'])
             transcript_text = ""
             if transcript_data:
-                # Para transcripciones normales de YouTube, eliminar timestamps
-                if transcript_info != "Whisper (audio)":
-                    transcript_text = " ".join([item['text'] for item in transcript_data])
-                else:
-                    # Para transcripciones de Whisper, ya vienen sin timestamps
-                    transcript_text = transcript_data[0]['text']
+                # Eliminar timestamps y unir texto
+                transcript_text = " ".join([item['text'] for item in transcript_data])
             
             videos.append({
                 'title': video['snippet']['title'],
