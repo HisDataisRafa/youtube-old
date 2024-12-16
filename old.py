@@ -7,6 +7,7 @@ import time
 import whisper
 from pytube import YouTube
 import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 # Inicializar todas las variables de estado necesarias
 if 'videos' not in st.session_state:
@@ -59,76 +60,85 @@ def get_channel_id(api_key, channel_identifier):
         st.error(f"Error al buscar el canal: {str(e)}")
         return None
 
-def get_audio_transcript(video_id):
+def _process_audio(video_id):
     """
-    Obtiene la transcripción del audio usando Whisper
+    Función auxiliar para procesar el audio
     """
-    try:
-        temp_dir = "temp_audio"
-        if not os.path.exists(temp_dir):
-            os.makedirs(temp_dir)
-            
-        temp_path = os.path.join(temp_dir, f"{video_id}.mp4")
+    temp_dir = "temp_audio"
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
         
+    temp_path = os.path.join(temp_dir, f"{video_id}.mp4")
+    
+    try:
+        st.info(f"Transcribiendo audio del video {video_id}...")
+        
+        # Intentar descargar con timeout interno
         try:
-            st.info(f"Transcribiendo audio del video {video_id}...")
             yt = YouTube(
-                f'https://youtube.com/watch?v={video_id}',
+                url=f'https://youtube.com/watch?v={video_id}',
                 use_oauth=True,
                 allow_oauth_cache=True
             )
             
-            # Intentar diferentes streams si el primero falla
-            audio_stream = None
-            for stream in yt.streams.filter(only_audio=True):
-                try:
-                    audio_stream = stream
-                    break
-                except:
-                    continue
-                    
-            if not audio_stream:
-                raise Exception("No se pudo obtener el audio del video")
+            # Obtener el stream de audio
+            streams = yt.streams.filter(only_audio=True)
+            if not streams:
+                raise Exception("No se encontraron streams de audio")
                 
+            audio_stream = streams.first()
             audio_stream.download(output_path=temp_dir, filename=f"{video_id}.mp4")
             
+            # Transcribir con Whisper con configuración optimizada para números
             model = load_whisper_model()
-            result = model.transcribe(temp_path, language='es')
+            result = model.transcribe(
+                temp_path,
+                language='es',
+                initial_prompt="Video con cifras y números. Los números deben transcribirse en dígitos.",
+                temperature=0,
+                condition_on_previous_text=True
+            )
             
-            # Procesar resultado sin timestamps
-            transcript_data = [
-                {
-                    'text': segment['text'].strip()
-                }
-                for segment in result['segments']
-            ]
+            # Procesar el texto sin timestamps
+            transcript_text = " ".join([segment['text'].strip() for segment in result['segments']])
             
-            return transcript_data, "Whisper (audio)"
+            return [{'text': transcript_text}], "Whisper (audio)"
             
-        finally:
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
-                    
+        except Exception as e:
+            raise Exception(f"Error al descargar audio: {str(e)}")
+            
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+
+def get_audio_transcript(video_id):
+    """
+    Obtiene la transcripción del audio usando Whisper con timeout
+    """
+    try:
+        with ThreadPoolExecutor() as executor:
+            future = executor.submit(_process_audio, video_id)
+            try:
+                return future.result(timeout=60)  # 60 segundos máximo
+            except TimeoutError:
+                st.warning(f"Timeout al procesar el video {video_id}")
+                return None, "No disponible"
     except Exception as e:
         st.warning(f"Error en la transcripción por audio: {str(e)}")
         return None, "No disponible"
 
 def get_transcript(video_id):
     """
-    Obtiene la transcripción de un video, primero intentando con la API de YouTube
-    y si no está disponible, usando Whisper
+    Obtiene la transcripción de un video, priorizando transcripciones de YouTube
     """
     try:
         # Obtener la lista de transcripciones disponibles
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        
-        # Lista de idiomas preferidos en orden de preferencia
         preferred_languages = ['es', 'es-ES', 'es-419', 'es-US', 'en', 'en-US', 'en-GB']
         
-        # Primer intento: buscar transcripción manual en idiomas preferidos
         transcript = None
         transcript_info = "No encontrada"
         
@@ -158,14 +168,12 @@ def get_transcript(video_id):
         # Si aún no hay transcripción, tomar cualquiera disponible
         if not transcript:
             try:
-                # Intentar obtener cualquier transcripción manual
                 available_transcripts = transcript_list.manual_transcripts
                 if available_transcripts:
                     transcript = list(available_transcripts.values())[0]
                     lang = transcript.language_code
                     transcript_info = f"Manual ({lang})"
                 else:
-                    # Como último recurso, tomar cualquier transcripción automática
                     available_transcripts = transcript_list.generated_transcripts
                     if available_transcripts:
                         transcript = list(available_transcripts.values())[0]
@@ -244,11 +252,20 @@ def get_channel_videos(api_key, channel_identifier, max_results=10):
             progress_text.text(f"Procesando video {i+1} de {total_videos}...")
             progress_bar.progress((i + 1) / total_videos)
             
-            # Obtener transcripción
-            transcript_data, transcript_info = get_transcript(video['id'])
+            # Obtener transcripción con timeout
+            try:
+                with ThreadPoolExecutor() as executor:
+                    future = executor.submit(get_transcript, video['id'])
+                    try:
+                        transcript_data, transcript_info = future.result(timeout=90)
+                    except TimeoutError:
+                        transcript_data, transcript_info = None, "Timeout excedido"
+            except Exception:
+                transcript_data, transcript_info = None, "Error al procesar"
+            
             transcript_text = ""
             if transcript_data:
-                # Eliminar timestamps y unir texto
+                # Procesar texto sin timestamps
                 transcript_text = " ".join([item['text'] for item in transcript_data])
             
             videos.append({
@@ -365,6 +382,7 @@ def main():
                 if video['transcript']:
                     transcripts_text += f"\n\n=== {video['title']} ===\n"
                     transcripts_text += f"URL: {video['url']}\n"
+                    transcripts_text += f"Tipo
                     transcripts_text += f"Tipo: {video['transcript_info']}\n\n"
                     transcripts_text += video['transcript']
                     transcripts_text += "\n\n" + "="*50 + "\n"
