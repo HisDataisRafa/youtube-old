@@ -382,7 +382,6 @@ def main():
                 if video['transcript']:
                     transcripts_text += f"\n\n=== {video['title']} ===\n"
                     transcripts_text += f"URL: {video['url']}\n"
-                    transcripts_text += f"Tipo
                     transcripts_text += f"Tipo: {video['transcript_info']}\n\n"
                     transcripts_text += video['transcript']
                     transcripts_text += "\n\n" + "="*50 + "\n"
